@@ -165,7 +165,7 @@ def backup(args):
 	path_id = id(path)
 
 	if not os.path.isdir(path):
-		print('backing up path (doesn\'t exist): %s...' % path)
+		print('path backup done (doesn\'t exist): %s' % path)
 		return
 
 	# find last backup and check if any file changed since last backup
@@ -211,16 +211,13 @@ def backup(args):
 			# write output
 			with io.open('%s/%s_%s.bak' % (target_path, path_id, ts()), 'wb') as f2:
 				f2.write(data)
-		os.sync()
-	else:
-		print('backing up path (unchanged): %s...' % path)
+				os.fsync(f2)
 
 	# remove obsolete backups
 	if max_backups and len(backups) > max_backups:
 		for backup in backups[max_backups:]:
 			os.unlink(backup['path'])
 			print('cleaned: %s' % backup['path'])
-		os.sync()
 
 	print('path backup done: %s' % path)
 
@@ -286,7 +283,7 @@ def restore(args):
 			print('path restore failed (invalid digest): %s' % path)
 			return
 		if path != str(local_path, 'utf-8'):
-			print('path restore path does\'t match: %s' % local_path)
+			print('path restore failed (path does\'t match): %s' % local_path)
 
 		# extract archive
 		with io.BytesIO(data) as f2:
@@ -294,6 +291,65 @@ def restore(args):
 				tar.extractall(target)
 
 	print('path restore done: %s' % path)
+
+
+def verify(args):
+	path = os.path.realpath(args.path)
+	path_id = id(path)
+
+	# list matching backups
+	backups = find_by_id(path_id)
+	if len(backups) == 0:
+		print('path verify failed (not found): %s' % path)
+		return
+
+	# verify backups
+	for backup in backups:
+		print('verifying path (%s): %s...' % (backup['time'].strftime('%Y-%m-%d %H:%M:%S'), path))
+		with io.open(backup['path'], 'rb') as f:
+			# read public header
+			(local_salt_size, local_pbkdf2_iterations, local_key_size) = struct.unpack('III', f.read(3 * 4));
+			local_salt = f.read(local_salt_size)
+			iv = f.read(AES.block_size)
+
+			# init cipher
+			local_key = pbkdf2(local_key_size, local_salt, local_pbkdf2_iterations)
+			cipher = AES.new(local_key, AES.MODE_CBC, iv)
+
+			# decrypt data
+			data = cipher.decrypt(f.read())
+
+			# read private header
+			i = 0
+			j = i + 3*4
+			(path_length, digest_length, data_length) = struct.unpack('III', data[i:j]);
+			i = j
+			j = i + path_length
+			if j > len(data):
+				print('path verify failed (invalid data): %s' % path)
+				return
+			local_path = data[i:j]
+			i = j
+			j = i + digest_length
+			if j > len(data) or digest_length != 32:
+				print('path verify failed (invalid data): %s' % path)
+				return
+			digest = data[i:j]
+			i = j
+			j = i + data_length
+			if j > len(data):
+				print('path verify failed (invalid data): %s' % path)
+				return
+			data = data[i:j]
+
+			# check path and digest
+			if sha256(data) != digest:
+				print('path verify failed (invalid digest): %s' % path)
+				return
+			if path != str(local_path, 'utf-8'):
+				print('path verify failed (path does\'t match): %s' % local_path)
+
+	print('path verification done: %s' % path)
 
 
 def configure(args):
@@ -315,7 +371,9 @@ def show(args):
 	print()
 	print('Targets:')
 	print('=======')
-	for path in paths:
+	_paths = list(paths)
+	_paths.sort()
+	for path in _paths:
 		path_id = id(path)
 		backups = find_by_id(path_id)
 		print('%s: %s' % (path_id, path))
@@ -382,6 +440,10 @@ parser.set_defaults(action=sync)
 parser = subparsers.add_parser('backup')
 parser.add_argument('path')
 parser.set_defaults(action=backup)
+
+parser = subparsers.add_parser('verify')
+parser.add_argument('path')
+parser.set_defaults(action=verify)
 
 parser = subparsers.add_parser('restore')
 parser.add_argument('path')
