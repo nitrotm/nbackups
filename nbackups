@@ -1,0 +1,394 @@
+#!/usr/bin/python
+
+import argparse, datetime, hashlib, io, json, os, stat, struct, tarfile
+from Crypto.Cipher import AES
+from Crypto import Random
+
+config_file = os.path.expanduser('~/.nbackups')
+
+def read_config():
+	try:
+		with io.open(config_file, 'r') as f:
+			return json.load(f)
+	except:
+		print("Cannot read configuration:", sys.exc_info()[0])
+		return dict()
+
+def write_config():
+	try:
+		with io.open(config_file, 'w') as f:
+			json.dump(config, f)
+		os.chmod(config_file, stat.S_IRUSR | stat.S_IWUSR)
+	except:
+		print("Cannot write configuration:", sys.exc_info()[0])
+
+
+config = read_config()
+
+if 'options' in config:
+	options = dict(config['options'])
+else:
+	options = dict()
+
+if 'password' in options:
+	password = str(options['password'])
+else:
+	password = None
+
+if 'saltSize' in options:
+	salt_size = int(options['saltSize'])
+else:
+	salt_size = 0
+
+if 'pbkdf2Iterations' in options:
+	pbkdf2_iterations = int(options['pbkdf2Iterations'])
+else:
+	pbkdf2_iterations = 0
+
+if 'keySize' in options:
+	key_size = int(options['keySize'])
+else:
+	key_size = 16
+
+if 'targetPath' in options:
+	target_path = str(options['targetPath'])
+else:
+	target_path = None
+
+if 'maxBackups' in options:
+	max_backups = max(1, int(options['maxBackups']))
+else:
+	max_backups = None
+
+if 'paths' in config:
+	paths = set(config['paths'])
+else:
+	paths = set()
+
+
+random = Random.new()
+
+
+def sha256(*values):
+	digest = hashlib.sha256()
+	for value in values:
+		digest.update(value)
+	return digest.digest()
+
+
+_salt = None
+
+def salt():
+	global _salt
+
+	if not _salt:
+		_salt = random.read(salt_size)
+	return _salt
+
+
+def pbkdf2(size, salt=salt(), iterations=pbkdf2_iterations):
+	password_raw = bytes(password, 'utf-8')
+	index = 0
+	digest = bytes()
+	while len(digest) < size:
+		block = bytearray(sha256(password_raw, salt, struct.pack('L', index)))
+		for i in range(0, iterations):
+			cur = sha256(password_raw, block)
+			for j in range(0, len(block)):
+				block[j] = block[j] ^ cur[j]
+		digest += block
+		index += 1
+	return digest[0:size]
+
+
+_key = None
+
+def key():
+	global _key
+
+	if not _key:
+		_key = pbkdf2(key_size)
+	return _key
+
+
+def pad(data, blockSize):
+	if (len(data) % blockSize) != 0:
+		return data + random.read(blockSize - len(data) % blockSize)
+	return data
+
+
+def ts():
+	return datetime.datetime.now(tz=datetime.timezone.utc).strftime('%Y%m%d%H%M%S')
+
+
+def id(path):
+	path_raw = bytes(path, 'utf-8')
+	digest = hashlib.sha256()
+	digest.update(path_raw)
+	return digest.hexdigest()
+
+
+def find_by_id(id, parent_path=target_path):
+	backups = list()
+	for item in os.listdir(parent_path):
+		item_path = os.path.join(parent_path, item)
+		if os.path.isdir(item_path):
+			backups = backups + find_by_id(id, item_path)
+		if os.path.isfile(item_path) and item.find(id) == 0 and item.rfind('.bak') == (len(item) - len('.bak')):
+			item_ts = item[len(id) + 1:len(id) + 15]
+			time = datetime.datetime.strptime(item_ts, '%Y%m%d%H%M%S').replace(tzinfo=datetime.timezone.utc)
+			backups.append({'path': item_path, 'time': time})
+	def backup_time(item):
+		return item['time']
+	backups.sort(key=backup_time, reverse=True)
+	return backups
+
+
+def find_most_recent_change(parent_path):
+	most_recent = None
+	for item in os.listdir(parent_path):
+		item_path = os.path.join(parent_path, item)
+		if os.path.isdir(item_path):
+			time = find_most_recent_change(item_path)
+			if time and (not most_recent or time > most_recent):
+				most_recent = time
+		if os.path.isfile(item_path):
+			time = datetime.datetime.fromtimestamp(os.path.getmtime(item_path), tz=datetime.timezone.utc)
+			if not most_recent or time > most_recent:
+				most_recent = time
+	return most_recent
+
+
+def backup(args):
+	path = os.path.realpath(args.path)
+	path_raw = bytes(path, 'utf-8')
+	path_id = id(path)
+
+	if not os.path.isdir(path):
+		print('backing up path (doesn\'t exist): %s...' % path)
+		return
+
+	# find last backup and check if any file changed since last backup
+	changed = None
+	backups = find_by_id(path_id)
+	if len(backups) > 0:
+		last_backup = backups[0]
+		most_recent = find_most_recent_change(path)
+		if last_backup['time'] > most_recent:
+			changed = False
+		else:
+			changed = True
+
+	# make new backup if necessary
+	if changed == None or changed:
+		if changed:
+			print('backing up path (changed): %s...' % path)
+		else:
+			print('backing up path (new): %s...' % path)
+		with io.BytesIO() as f:
+			# archive data
+			with tarfile.open(mode='w:xz', fileobj=f) as tar:
+				tar.add(path, arcname='')
+			data = f.getvalue()
+
+			# write private header
+			digest = sha256(data)
+			data = struct.pack('III', len(path_raw), len(digest), len(data)) + path_raw + digest + data
+
+			# pad block
+			data = pad(data, AES.block_size)
+
+			# compute unique iv and init cipher
+			iv = random.read(AES.block_size)
+			cipher = AES.new(key(), AES.MODE_CBC, iv)
+
+			# encrypt data
+			data = cipher.encrypt(data)
+
+			# write public header
+			data = struct.pack('III', salt_size, pbkdf2_iterations, key_size) + salt() + iv + data
+
+			# write output
+			with io.open('%s/%s_%s.bak' % (target_path, path_id, ts()), 'wb') as f2:
+				f2.write(data)
+		os.sync()
+	else:
+		print('backing up path (unchanged): %s...' % path)
+
+	# remove obsolete backups
+	if max_backups and len(backups) > max_backups:
+		for backup in backups[max_backups:]:
+			os.unlink(backup['path'])
+			print('cleaned: %s' % backup['path'])
+		os.sync()
+
+	print('path backup done: %s' % path)
+
+
+def restore(args):
+	path = os.path.realpath(args.path)
+	target = os.path.realpath(args.target)
+	path_id = id(path)
+
+	# check that target is valid
+	if os.path.exists(target):
+		print('path restore failed (target already exist): %s' % target)
+		return
+	os.makedirs(target, 0o755)
+
+	# list matching backups
+	backups = find_by_id(path_id)
+	if len(backups) == 0:
+		print('path restore failed (not found): %s' % path)
+		return
+
+	# select last backup
+	last_backup = backups[0]
+	print('restoring path (%s): %s...' % (last_backup['time'].strftime('%Y-%m-%d %H:%M:%S'), path))
+	with io.open(last_backup['path'], 'rb') as f:
+		# read public header
+		(local_salt_size, local_pbkdf2_iterations, local_key_size) = struct.unpack('III', f.read(3 * 4));
+		local_salt = f.read(local_salt_size)
+		iv = f.read(AES.block_size)
+
+		# init cipher
+		local_key = pbkdf2(local_key_size, local_salt, local_pbkdf2_iterations)
+		cipher = AES.new(local_key, AES.MODE_CBC, iv)
+
+		# decrypt data
+		data = cipher.decrypt(f.read())
+
+		# read private header
+		i = 0
+		j = i + 3*4
+		(path_length, digest_length, data_length) = struct.unpack('III', data[i:j]);
+		i = j
+		j = i + path_length
+		if j > len(data):
+			print('path restore failed (invalid data): %s' % path)
+			return
+		local_path = data[i:j]
+		i = j
+		j = i + digest_length
+		if j > len(data) or digest_length != 32:
+			print('path restore failed (invalid data): %s' % path)
+			return
+		digest = data[i:j]
+		i = j
+		j = i + data_length
+		if j > len(data):
+			print('path restore failed (invalid data): %s' % path)
+			return
+		data = data[i:j]
+
+		# check path and digest
+		if sha256(data) != digest:
+			print('path restore failed (invalid digest): %s' % path)
+			return
+		if path != str(local_path, 'utf-8'):
+			print('path restore path does\'t match: %s' % local_path)
+
+		# extract archive
+		with io.BytesIO(data) as f2:
+			with tarfile.open(mode='r:xz', fileobj=f2) as tar:
+				tar.extractall(target)
+
+	print('path restore done: %s' % path)
+
+
+def configure(args):
+	if args.key == 'targetPath':
+		options[args.key] = os.path.realpath(args.value)
+	else:
+		options[args.key] = args.value
+	config['options'] = options
+	write_config()
+
+def show(args):
+	print('Configuration:')
+	print('=============')
+	for key in options:
+		if key == 'password':
+			print('%s: ***' % key)
+		else:
+			print('%s: %s' % (key, options[key]))
+	print()
+	print('Targets:')
+	print('=======')
+	for path in paths:
+		path_id = id(path)
+		backups = find_by_id(path_id)
+		print('%s: %s' % (path_id, path))
+
+def add(args):
+	_path = os.path.realpath(args.path)
+	if len(_path) > 0 and _path not in paths:
+		# check hash collisions
+		path_id = id(_path)
+		for item in paths:
+			item_id = id(item)
+			if item_id == path_id:
+				print('cannot register path (collision): %s' % _path)
+				return
+		paths.add(_path)
+		print('registered new path: %s' % _path)
+	config['paths'] = list(paths)
+	write_config()
+
+	class BackupArgs(object):
+		path = _path
+	backup(BackupArgs())
+
+def remove(args):
+	path = os.path.realpath(args.path)
+	if len(path) > 0 and path in paths:
+		paths.remove(path)
+		print('unregistered path: %s' % path)
+	config['paths'] = list(paths)
+	write_config()
+
+
+def sync(args):
+	for item in paths:
+		class BackupArgs(object):
+			path = item
+		backup(BackupArgs())
+
+
+mainparser = argparse.ArgumentParser(description='Automated backups with encryption.')
+
+subparsers = mainparser.add_subparsers()
+
+parser = subparsers.add_parser('set')
+parser.add_argument('key')
+parser.add_argument('value')
+parser.set_defaults(action=configure)
+
+parser = subparsers.add_parser('list')
+parser.set_defaults(action=show)
+
+parser = subparsers.add_parser('add')
+parser.add_argument('path')
+parser.set_defaults(action=add)
+
+parser = subparsers.add_parser('remove')
+parser.add_argument('path')
+parser.set_defaults(action=remove)
+
+
+parser = subparsers.add_parser('sync')
+parser.set_defaults(action=sync)
+
+parser = subparsers.add_parser('backup')
+parser.add_argument('path')
+parser.set_defaults(action=backup)
+
+parser = subparsers.add_parser('restore')
+parser.add_argument('path')
+parser.add_argument('target')
+parser.set_defaults(action=restore)
+
+
+args = mainparser.parse_args()
+if hasattr(args, 'action'):
+	args.action(args)
