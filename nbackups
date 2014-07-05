@@ -152,7 +152,8 @@ def find_by_id(id, parent_path=target_path):
 		if os.path.isfile(item_path) and item.find(id) == 0 and item.rfind('.bak') == (len(item) - len('.bak')):
 			item_ts = item[len(id) + 1:len(id) + 15]
 			time = datetime.datetime.strptime(item_ts, '%Y%m%d%H%M%S').replace(tzinfo=datetime.timezone.utc)
-			backups.append({'path': item_path, 'time': time})
+			stat = os.stat(item_path)
+			backups.append({'path': item_path, 'time': time, 'size': stat.st_size})
 	def backup_time(item):
 		return item['time']
 	backups.sort(key=backup_time, reverse=True)
@@ -178,6 +179,11 @@ def backup(args):
 	path = os.path.realpath(args.path)
 	path_raw = bytes(path, 'utf-8')
 	path_id = id(path)
+
+	# check if path is registered
+	if not path in paths:
+		print('path backup failed (not registred): %s' % path)
+		return
 
 	# find last backup and check if any file changed since last backup
 	backups = find_by_id(path_id)
@@ -208,7 +214,7 @@ def backup(args):
 				data_offset = f.tell()
 				with tarfile.open(mode='w:xz', fileobj=f) as tar:
 					tar.add(path, arcname='')
-				data_end = f.tell()
+				data_end = os.fstat(f.fileno()).st_size
 
 				# compute data checksum and write private header again
 				digest = sha256_file(f, data_offset, data_end - data_offset)
@@ -243,7 +249,7 @@ def backup(args):
 	if max_backups and len(backups) > max_backups:
 		for backup in backups[max_backups:]:
 			os.unlink(backup['path'])
-			print('  CLEANED: %s' % backup['path'])
+			print('  CLEANED: %s' % backup['time'].astimezone().strftime('%Y-%m-%d %H:%M:%S'))
 
 	print('  DONE.')
 
@@ -253,11 +259,15 @@ def restore(args):
 	target = os.path.realpath(args.target)
 	path_id = id(path)
 
+	# check if path is registered
+	if not path in paths:
+		print('path backup failed (not registred): %s' % path)
+		return
+
 	# check that target is valid
 	if os.path.exists(target):
 		print('path restore failed (target already exist): %s' % target)
 		return
-	os.makedirs(target, 0o755)
 
 	# list matching backups
 	backups = find_by_id(path_id)
@@ -271,15 +281,13 @@ def restore(args):
 			(local_salt_size, local_pbkdf2_iterations, local_key_size) = struct.unpack('III', f.read(3 * 4));
 			local_salt = f.read(local_salt_size)
 			iv = f.read(AES.block_size)
-			data_offset = f.tell()
-			data_end = f.seek(0, os.SEEK_END)
+			data_end = os.stat(last_backup['path']).st_size
 
 			# init cipher
 			local_key = pbkdf2(local_key_size, local_salt, local_pbkdf2_iterations)
 			cipher = AES.new(local_key, AES.MODE_CBC, iv)
 
 			# decrypt data to temporary file
-			f.seek(data_offset)
 			with tempfile.TemporaryFile() as f2:
 				# decrypt
 				bufferSize = AES.block_size * 1024
@@ -316,8 +324,9 @@ def restore(args):
 					print('  FAILED (path does\'t match): %s != %s' % (path, local_path))
 
 				# extract archive
-				f.seek(tar_offset)
+				f2.seek(tar_offset)
 				with tarfile.open(mode='r:xz', fileobj=f2) as tar:
+					os.makedirs(target, 0o755)
 					tar.extractall(target)
 	else:
 		print('restoring path (no backup found): %s...' % path)
@@ -328,6 +337,11 @@ def restore(args):
 def verify(args):
 	path = os.path.realpath(args.path)
 	path_id = id(path)
+
+	# check if path is registered
+	if not path in paths:
+		print('path backup failed (not registred): %s' % path)
+		return
 
 	# list matching backups
 	backups = find_by_id(path_id)
@@ -340,15 +354,13 @@ def verify(args):
 			(local_salt_size, local_pbkdf2_iterations, local_key_size) = struct.unpack('III', f.read(3 * 4));
 			local_salt = f.read(local_salt_size)
 			iv = f.read(AES.block_size)
-			data_offset = f.tell()
-			data_end = f.seek(0, os.SEEK_END)
+			data_end = os.stat(backup['path']).st_size
 
 			# init cipher
 			local_key = pbkdf2(local_key_size, local_salt, local_pbkdf2_iterations)
 			cipher = AES.new(local_key, AES.MODE_CBC, iv)
 
 			# decrypt data to temporary file
-			f.seek(data_offset)
 			with tempfile.TemporaryFile() as f2:
 				# decrypt
 				bufferSize = AES.block_size * 1024
@@ -391,14 +403,6 @@ def verify(args):
 	return True
 
 
-def configure(args):
-	if args.key == 'targetPath':
-		options[args.key] = os.path.realpath(args.value)
-	else:
-		options[args.key] = args.value
-	config['options'] = options
-	write_config()
-
 def show(args):
 	print('Configuration:')
 	print('=============')
@@ -416,6 +420,19 @@ def show(args):
 		path_id = id(path)
 		backups = find_by_id(path_id)
 		print('%s: %s' % (path_id, path))
+		for backup in backups:
+			print('  %s: %.01f [mb]' % (backup['time'].astimezone().strftime('%Y-%m-%d %H:%M:%S'), backup['size'] / 1024.0 / 1024.0) )
+		print()
+
+
+def configure(args):
+	if args.key == 'targetPath':
+		options[args.key] = os.path.realpath(args.value)
+	else:
+		options[args.key] = args.value
+	config['options'] = options
+	write_config()
+
 
 def add(args):
 	_path = os.path.realpath(args.path)
@@ -428,21 +445,34 @@ def add(args):
 				print('cannot register path (collision): %s' % _path)
 				return
 		paths.add(_path)
+		config['paths'] = list(paths)
+		write_config()
 		print('registered new path: %s' % _path)
-	config['paths'] = list(paths)
-	write_config()
 
-	class BackupArgs(object):
-		path = _path
-	backup(BackupArgs())
+		# do first backup if necessary
+		backups = find_by_id(path_id)
+		if len(backups) == 0:
+			print()
+			class BackupArgs(object):
+				path = _path
+			backup(BackupArgs())
+
 
 def remove(args):
 	path = os.path.realpath(args.path)
 	if len(path) > 0 and path in paths:
+		path_id = id(path)
+		backups = find_by_id(path_id)
 		paths.remove(path)
 		print('unregistered path: %s' % path)
-	config['paths'] = list(paths)
-	write_config()
+		config['paths'] = list(paths)
+		write_config()
+
+		# clean old backups
+		if args.clean:
+			for backup in backups:
+				os.unlink(backup['path'])
+				print('  CLEANED: %s' % backup['time'].astimezone().strftime('%Y-%m-%d %H:%M:%S'))
 
 
 def sync(args):
@@ -462,19 +492,20 @@ mainparser = argparse.ArgumentParser(description='Automated backups with encrypt
 
 subparsers = mainparser.add_subparsers()
 
-parser = subparsers.add_parser('set')
+parser = subparsers.add_parser('list')
+parser.set_defaults(action=show)
+
+parser = subparsers.add_parser('config')
 parser.add_argument('key')
 parser.add_argument('value')
 parser.set_defaults(action=configure)
-
-parser = subparsers.add_parser('list')
-parser.set_defaults(action=show)
 
 parser = subparsers.add_parser('add')
 parser.add_argument('path')
 parser.set_defaults(action=add)
 
 parser = subparsers.add_parser('remove')
+parser.add_argument('--clean', required=False, action='store_const', const=True)
 parser.add_argument('path')
 parser.set_defaults(action=remove)
 
