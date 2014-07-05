@@ -80,8 +80,9 @@ def sha256_file(f, offset=0, size=None):
 	if not size:
 		size = f.seek(os.SEEK_END)
 	f.seek(offset)
-	while offset < size:
-		bufferSize = size - offset
+	end = offset + size
+	while offset < end:
+		bufferSize = end - offset
 		if bufferSize > 1024:
 			bufferSize = 1024
 		buffer = f.read(bufferSize)
@@ -445,7 +446,9 @@ def remove(args):
 
 
 def sync(args):
-	for item in paths:
+	_paths = list(paths)
+	_paths.sort()
+	for item in _paths:
 		class BackupArgs(object):
 			path = item
 		args2 = BackupArgs()
