@@ -246,6 +246,7 @@ def backup(args):
 		print('backing up path (not found): %s...' % path)
 
 	# remove obsolete backups
+	backups = find_by_id(path_id)
 	if max_backups and len(backups) > max_backups:
 		for backup in backups[max_backups:]:
 			os.unlink(backup['path'])
