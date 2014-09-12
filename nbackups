@@ -169,35 +169,37 @@ def id(path):
 
 def find_by_id(id, parent_path):
 	backups = list()
-	for item in os.listdir(parent_path):
-		item_path = os.path.join(parent_path, item)
-		if os.path.isdir(item_path):
-			backups = backups + find_by_id(id, item_path)
-		if os.path.isfile(item_path) and item.find(id) == 0 and item.rfind('.bak') == (len(item) - len('.bak')):
-			item_ts = item[len(id) + 1:len(id) + 15]
-			item_time = datetime.datetime.strptime(item_ts, '%Y%m%d%H%M%S').replace(tzinfo=datetime.timezone.utc)
-			stat = os.stat(item_path)
-			backups.append({'path': item_path, 'time': item_time, 'size': stat.st_size})
-	def backup_time(item):
-		return item['time']
-	backups.sort(key=backup_time, reverse=True)
+	if os.access(parent_path, os.R_OK):
+		for item in os.listdir(parent_path):
+			item_path = os.path.join(parent_path, item)
+			if os.path.isdir(item_path):
+				backups = backups + find_by_id(id, item_path)
+			if os.path.isfile(item_path) and item.find(id) == 0 and item.rfind('.bak') == (len(item) - len('.bak')):
+				item_ts = item[len(id) + 1:len(id) + 15]
+				item_time = datetime.datetime.strptime(item_ts, '%Y%m%d%H%M%S').replace(tzinfo=datetime.timezone.utc)
+				stat = os.stat(item_path)
+				backups.append({'path': item_path, 'time': item_time, 'size': stat.st_size})
+		def backup_time(item):
+			return item['time']
+		backups.sort(key=backup_time, reverse=True)
 	return backups
 
 
 def find_all(parent_path):
 	backups = list()
-	for item in os.listdir(parent_path):
-		item_path = os.path.join(parent_path, item)
-		if os.path.isdir(item_path):
-			backups = backups + find_all(id, item_path)
-		if os.path.isfile(item_path) and item.rfind('.bak') == (len(item) - len('.bak')):
-			i = item.find('_')
-			if i <= 0:
-				continue
-			item_ts = item[i + 1:i + 15]
-			item_time = datetime.datetime.strptime(item_ts, '%Y%m%d%H%M%S').replace(tzinfo=datetime.timezone.utc)
-			stat = os.stat(item_path)
-			backups.append({'path': item_path, 'time': item_time, 'size': stat.st_size})
+	if os.access(parent_path, os.R_OK):
+		for item in os.listdir(parent_path):
+			item_path = os.path.join(parent_path, item)
+			if os.path.isdir(item_path):
+				backups = backups + find_all(id, item_path)
+			if os.path.isfile(item_path) and item.rfind('.bak') == (len(item) - len('.bak')):
+				i = item.find('_')
+				if i <= 0:
+					continue
+				item_ts = item[i + 1:i + 15]
+				item_time = datetime.datetime.strptime(item_ts, '%Y%m%d%H%M%S').replace(tzinfo=datetime.timezone.utc)
+				stat = os.stat(item_path)
+				backups.append({'path': item_path, 'time': item_time, 'size': stat.st_size})
 	return backups
 
 
@@ -276,6 +278,9 @@ def backup(args):
 			# encrypt data to output
 			for target in targets:
 				print(' TARGET: %s' % target)
+				if not os.access(target, os.W_OK):
+					print('  SKIPPED(denied)')
+					continue
 				if target in changed:
 					f.seek(0)
 					with io.open('%s/%s_%s.bak' % (target, path_id, ts.strftime('%Y%m%d%H%M%S')), 'wb') as f2:
@@ -485,6 +490,8 @@ def init(args):
 
 	options['saltSize'] = int(input('Salt size: '))
 
+	options['keySize'] = int(input('Key size: '))
+
 	delta_time = 0.0
 	pbkdf2_iterations = 100000
 	while delta_time < 1.0:
@@ -544,7 +551,7 @@ def show(args):
 			print(' %s' % target)
 			for backup in backups:
 				print('  %s: %.01f [mb]' % (backup['time'].astimezone().strftime('%Y-%m-%d %H:%M:%S'), backup['size'] / 1024.0 / 1024.0) )
-			print()
+		print()
 
 
 def configure(args):
