@@ -337,7 +337,7 @@ def restore(args):
 		return False
 
 	# check that target is valid (must not exist already)
-	if os.path.exists(dst):
+	if not args.force and os.path.exists(dst):
 		print(' FAILED (target already exist)')
 		return False
 
@@ -582,14 +582,15 @@ def add(args):
 		print('registered new path: %s' % _path)
 
 		# do first backup if necessary
-		backups = 0
-		for target in targets:
-			backups += len(find_by_id(path_id, target))
-		if backups == 0:
-			print()
-			class BackupArgs(object):
-				path = _path
-			backup(BackupArgs())
+		if not args.nosync:
+			backups = 0
+			for target in targets:
+				backups += len(find_by_id(path_id, target))
+			if backups == 0:
+				print()
+				class BackupArgs(object):
+					path = _path
+				backup(BackupArgs())
 
 
 def discover(args):
@@ -718,6 +719,7 @@ parser.add_argument('value')
 parser.set_defaults(action=configure)
 
 parser = subparsers.add_parser('add')
+parser.add_argument('--nosync', required=False, action='store_const', const=True)
 parser.add_argument('path')
 parser.set_defaults(action=add)
 
@@ -743,6 +745,7 @@ parser.add_argument('path')
 parser.set_defaults(action=verify)
 
 parser = subparsers.add_parser('restore')
+parser.add_argument('--force', required=False, action='store_const', const=True)
 parser.add_argument('path')
 parser.add_argument('target')
 parser.set_defaults(action=restore)
