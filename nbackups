@@ -677,7 +677,7 @@ def remove(args):
 		path_id = id(path)
 		backups = []
 		for target in targets:
-			backups = backups.extend(find_by_id(path_id, target))
+			backups.extend(find_by_id(path_id, target))
 		paths.remove(path)
 		print('unregistered path: %s' % path)
 		config['paths'] = list(paths)
