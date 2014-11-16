@@ -738,8 +738,9 @@ def sync(args):
 	_paths.sort()
 	for item in _paths:
 		class BackupArgs(object):
-			path = item
+			clean = args.clean
 			force = args.force
+			path = item
 		args2 = BackupArgs()
 		backup(args2)
 		if args.verify:
@@ -778,6 +779,7 @@ parser.set_defaults(action=remove)
 
 parser = subparsers.add_parser('sync')
 parser.add_argument('--verify', required=False, action='store_const', const=True)
+parser.add_argument('--clean', required=False, action='store_const', const=True)
 parser.add_argument('--force', required=False, action='store_const', const=True)
 parser.set_defaults(action=sync)
 
