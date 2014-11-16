@@ -683,10 +683,10 @@ def discover(args):
 						print(' WARNING (invalid data #4): %s' % backup['path'])
 						continue
 
-					# check path and digest
-					if sha256_file(f2, tar_offset, tar_length) != digest:
-						print(' FAILED (invalid digest): %s' % backup['path'])
-						continue
+					# check digest
+					# if sha256_file(f2, tar_offset, tar_length) != digest:
+					# 	print(' FAILED (invalid digest): %s' % backup['path'])
+					# 	continue
 					local_path = str(local_path, 'utf-8')
 
 					_path = os.path.realpath(local_path)
