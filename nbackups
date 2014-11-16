@@ -97,6 +97,36 @@ else:
 random = Random.new()
 
 
+def fread(f, bufferSize):
+	buffer = bytes()
+	while len(buffer) < bufferSize:
+		data = f.read(bufferSize - len(buffer))
+		if len(data) == 0:
+			break
+		if data:
+			buffer = buffer + data
+	return buffer
+
+def pad(data, blockSize):
+	if (len(data) % blockSize) != 0:
+		return data + random.read(blockSize - len(data) % blockSize)
+	return data
+
+def freadpadded(f, blockCount, blockSize):
+	return pad(fread(f, blockCount * blockSize), blockSize)
+
+def fwrite(f, data):
+	offset = 0
+	while offset < len(data):
+		written = f.write(data[offset:])
+		if written > 0:
+			offset += written
+
+def printhex(label, data):
+	value = [ '%X' % data[i] for i in range(len(data)) ]
+	print('%s: %s' % (label, ' '.join(value)))
+
+
 def sha256(*values):
 	digest = hashlib.sha256()
 	for value in values:
@@ -113,7 +143,7 @@ def sha256_file(f, offset=0, size=None):
 		bufferSize = end - offset
 		if bufferSize > 1024:
 			bufferSize = 1024
-		buffer = f.read(bufferSize)
+		buffer = fread(f, bufferSize)
 		offset += len(buffer)
 		digest.update(buffer)
 	return digest.digest()
@@ -152,13 +182,6 @@ def key():
 	if not _key:
 		_key = pbkdf2(key_size)
 	return _key
-
-
-def pad(data, blockSize):
-	if (len(data) % blockSize) != 0:
-		return data + random.read(blockSize - len(data) % blockSize)
-	return data
-
 
 def id(path):
 	path_raw = bytes(path, 'utf-8')
@@ -250,14 +273,14 @@ def backup(args):
 	changed = obsolete | missing
 
 	# make new backup if necessary
-	if len(changed) > 0:
+	if args.force or len(changed) > 0:
 		ts = datetime.datetime.now(tz=datetime.timezone.utc)
 		with tempfile.TemporaryFile() as f:
 			# compute empty checksum
 			digest = sha256()
 
 			# write private header
-			f.write(struct.pack('III', len(path_raw), len(digest), 0) + path_raw + digest)
+			fwrite(f, struct.pack('III', len(path_raw), len(digest), 0) + path_raw + digest)
 
 			# archive data
 			data_offset = f.tell()
@@ -269,7 +292,7 @@ def backup(args):
 			# compute data checksum and write private header again
 			digest = sha256_file(f, data_offset, data_end - data_offset)
 			f.seek(0)
-			f.write(struct.pack('III', len(path_raw), len(digest), data_end - data_offset) + path_raw + digest)
+			fwrite(f, struct.pack('III', len(path_raw), len(digest), data_end - data_offset) + path_raw + digest)
 
 			# compute unique iv and init cipher
 			iv = random.read(AES.block_size)
@@ -281,20 +304,16 @@ def backup(args):
 				if not os.access(target, os.W_OK):
 					print('  SKIPPED(denied)')
 					continue
-				if target in changed:
+				if args.force or target in changed:
 					f.seek(0)
 					with io.open('%s/%s_%s.bak' % (target, path_id, ts.strftime('%Y%m%d%H%M%S')), 'wb') as f2:
 						# write public header
-						f2.write(struct.pack('III', salt_size, pbkdf2_iterations, key_size) + salt() + iv)
+						fwrite(f2, struct.pack('III', salt_size, pbkdf2_iterations, key_size) + salt() + iv)
 
 						# encrypt
-						bufferSize = AES.block_size * 1024
 						while f.tell() < data_end:
-							buffer = bytes()
-							while len(buffer) < bufferSize and f.tell() < data_end:
-								buffer = buffer + f.read(bufferSize - len(buffer))
-							buffer = pad(buffer, AES.block_size)
-							f2.write(cipher.encrypt(buffer))
+							buffer = freadpadded(f, 1024, AES.block_size)
+							fwrite(f2, cipher.encrypt(buffer))
 						os.fsync(f2)
 					if target in obsolete:
 						print('  DONE(changed): %s' % ts.astimezone().strftime('%Y-%m-%d %H:%M:%S'))
@@ -355,9 +374,9 @@ def restore(args):
 		last_backup = backups[0]
 		with io.open(last_backup['path'], 'rb') as f:
 			# read public header
-			(local_salt_size, local_pbkdf2_iterations, local_key_size) = struct.unpack('III', f.read(3 * 4));
-			local_salt = f.read(local_salt_size)
-			iv = f.read(AES.block_size)
+			(local_salt_size, local_pbkdf2_iterations, local_key_size) = struct.unpack('III', fread(f, 3 * 4));
+			local_salt = fread(f, local_salt_size)
+			iv = fread(f, AES.block_size)
 			data_end = os.stat(last_backup['path']).st_size
 
 			# init cipher
@@ -369,34 +388,32 @@ def restore(args):
 				# decrypt
 				bufferSize = AES.block_size * 1024
 				while f.tell() < data_end:
-					buffer = bytes()
-					while len(buffer) < bufferSize and f.tell() < data_end:
-						buffer = buffer + f.read(bufferSize - len(buffer))
+					buffer = fread(f, bufferSize)
 					f2.write(cipher.decrypt(buffer))
 
 				# read private header
 				f2.seek(0)
-				(path_length, digest_length, tar_length) = struct.unpack('III', f2.read(3*4));
+				(path_length, digest_length, tar_length) = struct.unpack('III', fread(f2, 3*4));
 				if f2.tell() != 3 * 4:
 					print('  FAILED (invalid data)')
-					return False
-				local_path = f2.read(path_length)
+					continue
+				local_path = fread(f2, path_length)
 				if len(local_path) != path_length:
 					print('  FAILED (invalid data)')
-					return False
-				digest = f2.read(digest_length)
+					continue
+				digest = fread(f2, digest_length)
 				if len(digest) != digest_length:
 					print('  FAILED (invalid data)')
-					return False
+					continue
 				tar_offset = f2.tell()
 				if f2.seek(tar_length, os.SEEK_CUR) != tar_offset + tar_length:
 					print('  FAILED (invalid data)')
-					return False
+					continue
 
 				# check path and digest
 				if sha256_file(f2, tar_offset, tar_length) != digest:
 					print('  FAILED (invalid digest)')
-					return False
+					continue
 				local_path = str(local_path, 'utf-8')
 				if path != local_path:
 					print('  WARNING (path does\'t match): %s' % local_path)
@@ -423,6 +440,7 @@ def verify(args):
 		return False
 
 	# verify all targets
+	success = True
 	for target in targets:
 		print(' TARGET: %s' % target)
 
@@ -430,11 +448,12 @@ def verify(args):
 		backups = find_by_id(path_id, target)
 		for backup in backups:
 			tstext = backup['time'].strftime('%Y-%m-%d %H:%M:%S')
+			failed = False
 			with io.open(backup['path'], 'rb') as f:
 				# read public header
-				(local_salt_size, local_pbkdf2_iterations, local_key_size) = struct.unpack('III', f.read(3 * 4));
-				local_salt = f.read(local_salt_size)
-				iv = f.read(AES.block_size)
+				(local_salt_size, local_pbkdf2_iterations, local_key_size) = struct.unpack('III', fread(f, 3 * 4));
+				local_salt = fread(f, local_salt_size)
+				iv = fread(f, AES.block_size)
 				data_end = os.stat(backup['path']).st_size
 
 				# init cipher
@@ -446,45 +465,69 @@ def verify(args):
 					# decrypt
 					bufferSize = AES.block_size * 1024
 					while f.tell() < data_end:
-						buffer = bytes()
-						while len(buffer) < bufferSize and f.tell() < data_end:
-							buffer = buffer + f.read(bufferSize - len(buffer))
+						buffer = fread(f, bufferSize)
 						f2.write(cipher.decrypt(buffer))
 
 					# read private header
 					f2.seek(0)
-					(path_length, digest_length, tar_length) = struct.unpack('III', f2.read(3*4));
+					(path_length, digest_length, tar_length) = struct.unpack('III', fread(f2, 3*4));
 					if f2.tell() != 3 * 4:
 						print('  FAILED (invalid data): %s' % tstext)
-						return False
-					local_path = f2.read(path_length)
+						if args.clean:
+							f.close()
+							os.unlink(backup['path'])
+						success = False
+						continue
+					local_path = fread(f2, path_length)
 					if len(local_path) != path_length:
 						print('  FAILED (invalid data): %s' % tstext)
-						return False
-					digest = f2.read(digest_length)
+						if args.clean:
+							f.close()
+							os.unlink(backup['path'])
+						success = False
+						continue
+					digest = fread(f2, digest_length)
 					if len(digest) != digest_length:
 						print('  FAILED (invalid data): %s' % tstext)
-						return False
+						if args.clean:
+							f.close()
+							os.unlink(backup['path'])
+						success = False
+						continue
 					tar_offset = f2.tell()
 					if f2.seek(tar_length, os.SEEK_CUR) != tar_offset + tar_length:
 						print('  FAILED (invalid data): %s' % tstext)
-						return False
+						if args.clean:
+							f.close()
+							os.unlink(backup['path'])
+						success = False
+						continue
 
 					# check path and digest
 					if sha256_file(f2, tar_offset, tar_length) != digest:
 						print('  FAILED (invalid digest): %s' % tstext)
-						return False
+						if args.clean:
+							f.close()
+							os.unlink(backup['path'])
+						success = False
+						continue
 					local_path = str(local_path, 'utf-8')
 					if path != local_path:
 						print('  FAILED (path does\'t match): %s' % local_path)
-						return False
+						if args.clean:
+							f.close()
+							os.unlink(backup['path'])
+						success = False
+						continue
 					print('  DONE: %s' % tstext)
 		if len(backups) == 0:
 			print('  DONE (no backups)')
-	return True
+	return success
 
 
 def init(args):
+	global password
+
 	options = dict()
 	targets = set()
 
@@ -494,6 +537,7 @@ def init(args):
 
 	delta_time = 0.0
 	pbkdf2_iterations = 100000
+	password = 'abcd'
 	while delta_time < 1.0:
 		pbkdf2_iterations *= 2
 		last_time = time.time()
@@ -529,7 +573,7 @@ def show(args):
 			print('%s: ***' % key)
 		else:
 			print('%s: %s' % (key, options[key]))
-	print()
+	print('')
 
 	print('Targets:')
 	print('=======')
@@ -537,7 +581,7 @@ def show(args):
 	_targets.sort()
 	for path in _targets:
 		print('%s' % path)
-	print()
+	print('')
 
 	print('Registred paths:')
 	print('===============')
@@ -551,7 +595,7 @@ def show(args):
 			print(' %s' % target)
 			for backup in backups:
 				print('  %s: %.01f [mb]' % (backup['time'].astimezone().strftime('%Y-%m-%d %H:%M:%S'), backup['size'] / 1024.0 / 1024.0) )
-		print()
+		print('')
 
 
 def configure(args):
@@ -587,7 +631,7 @@ def add(args):
 			for target in targets:
 				backups += len(find_by_id(path_id, target))
 			if backups == 0:
-				print()
+				print('')
 				class BackupArgs(object):
 					path = _path
 				backup(BackupArgs())
@@ -602,9 +646,9 @@ def discover(args):
 		for backup in backups:
 			with io.open(backup['path'], 'rb') as f:
 				# read public header
-				(local_salt_size, local_pbkdf2_iterations, local_key_size) = struct.unpack('III', f.read(3 * 4));
-				local_salt = f.read(local_salt_size)
-				iv = f.read(AES.block_size)
+				(local_salt_size, local_pbkdf2_iterations, local_key_size) = struct.unpack('III', fread(f, 3 * 4));
+				local_salt = fread(f, local_salt_size)
+				iv = fread(f, AES.block_size)
 				data_end = os.stat(backup['path']).st_size
 
 				# init cipher
@@ -616,28 +660,27 @@ def discover(args):
 					# decrypt
 					bufferSize = AES.block_size * 1024
 					while f.tell() < data_end:
-						buffer = bytes()
-						while len(buffer) < bufferSize and f.tell() < data_end:
-							buffer = buffer + f.read(bufferSize - len(buffer))
+						buffer = fread(f, bufferSize)
 						f2.write(cipher.decrypt(buffer))
 
 					# read private header
 					f2.seek(0)
-					(path_length, digest_length, tar_length) = struct.unpack('III', f2.read(3*4));
+					(path_length, digest_length, tar_length) = struct.unpack('III', fread(f2, 3*4));
 					if f2.tell() != 3 * 4:
-						print(' WARNING (invalid data): %s' % backup['path'])
+						print(' WARNING (invalid data #1): %s' % backup['path'])
 						continue
-					local_path = f2.read(path_length)
+
+					local_path = fread(f2, path_length)
 					if len(local_path) != path_length:
-						print(' WARNING (invalid data): %s' % backup['path'])
+						print(' WARNING (invalid data #2): %s' % backup['path'])
 						continue
-					digest = f2.read(digest_length)
+					digest = fread(f2, digest_length)
 					if len(digest) != digest_length:
-						print(' WARNING (invalid data): %s' % backup['path'])
+						print(' WARNING (invalid data #3): %s' % backup['path'])
 						continue
 					tar_offset = f2.tell()
 					if f2.seek(tar_length, os.SEEK_CUR) != tar_offset + tar_length:
-						print(' WARNING (invalid data): %s' % backup['path'])
+						print(' WARNING (invalid data #4): %s' % backup['path'])
 						continue
 
 					# check path and digest
@@ -655,7 +698,7 @@ def discover(args):
 						if not local_path in skipped:
 							skipped.add(local_path)
 						print(' SKIPPED: %s' % backup['path'])
-	print()
+	print('')
 
 	config['paths'] = list(paths)
 	write_config()
@@ -663,12 +706,12 @@ def discover(args):
 	print('registered paths:')
 	for path in paths:
 		print(' %s' % path)
-	print()
+	print('')
 
 	print('skipped paths:')
 	for path in skipped:
 		print(' %s' % path)
-	print()
+	print('')
 
 
 def remove(args):
@@ -696,11 +739,12 @@ def sync(args):
 	for item in _paths:
 		class BackupArgs(object):
 			path = item
+			force = args.force
 		args2 = BackupArgs()
 		backup(args2)
 		if args.verify:
 			verify(args2)
-		print()
+		print('')
 
 
 mainparser = argparse.ArgumentParser(description='Automated backups with encryption.')
@@ -734,13 +778,16 @@ parser.set_defaults(action=remove)
 
 parser = subparsers.add_parser('sync')
 parser.add_argument('--verify', required=False, action='store_const', const=True)
+parser.add_argument('--force', required=False, action='store_const', const=True)
 parser.set_defaults(action=sync)
 
 parser = subparsers.add_parser('backup')
+parser.add_argument('--force', required=False, action='store_const', const=True)
 parser.add_argument('path')
 parser.set_defaults(action=backup)
 
 parser = subparsers.add_parser('verify')
+parser.add_argument('--clean', required=False, action='store_const', const=True)
 parser.add_argument('path')
 parser.set_defaults(action=verify)
 
