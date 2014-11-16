@@ -304,6 +304,8 @@ def backup(args):
 				if not os.access(target, os.W_OK):
 					print('  SKIPPED(denied)')
 					continue
+				backups = find_by_id(path_id, target)
+
 				if args.force or target in changed:
 					f.seek(0)
 					with io.open('%s/%s_%s.bak' % (target, path_id, ts.strftime('%Y%m%d%H%M%S')), 'wb') as f2:
@@ -323,7 +325,6 @@ def backup(args):
 					print('  UP-TO-DATE: %s' % backups[0]['time'].astimezone().strftime('%Y-%m-%d %H:%M:%S'))
 
 				# remove obsolete backups
-				backups = find_by_id(path_id, target)
 				if max_backups and len(backups) > max_backups:
 					for backup in backups[max_backups:]:
 						os.unlink(backup['path'])
@@ -447,8 +448,7 @@ def verify(args):
 		# verify backups
 		backups = find_by_id(path_id, target)
 		for backup in backups:
-			tstext = backup['time'].strftime('%Y-%m-%d %H:%M:%S')
-			failed = False
+			tstext = backup['time'].astimezone().strftime('%Y-%m-%d %H:%M:%S')
 			with io.open(backup['path'], 'rb') as f:
 				# read public header
 				(local_salt_size, local_pbkdf2_iterations, local_key_size) = struct.unpack('III', fread(f, 3 * 4));
