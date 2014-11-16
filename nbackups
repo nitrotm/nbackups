@@ -390,7 +390,7 @@ def restore(args):
 				bufferSize = AES.block_size * 1024
 				while f.tell() < data_end:
 					buffer = fread(f, bufferSize)
-					f2.write(cipher.decrypt(buffer))
+					fwrite(f2, cipher.decrypt(buffer))
 
 				# read private header
 				f2.seek(0)
@@ -466,7 +466,7 @@ def verify(args):
 					bufferSize = AES.block_size * 1024
 					while f.tell() < data_end:
 						buffer = fread(f, bufferSize)
-						f2.write(cipher.decrypt(buffer))
+						fwrite(f2, cipher.decrypt(buffer))
 
 					# read private header
 					f2.seek(0)
@@ -657,11 +657,8 @@ def discover(args):
 
 				# decrypt data to temporary file
 				with tempfile.TemporaryFile() as f2:
-					# decrypt
-					bufferSize = AES.block_size * 1024
-					while f.tell() < data_end:
-						buffer = fread(f, bufferSize)
-						f2.write(cipher.decrypt(buffer))
+					# decrypt first block
+					fwrite(f2, cipher.decrypt(fread(f, AES.block_size)))
 
 					# read private header
 					f2.seek(0)
@@ -669,26 +666,27 @@ def discover(args):
 					if f2.tell() != 3 * 4:
 						print(' WARNING (invalid data #1): %s' % backup['path'])
 						continue
+					f2.seek(AES.block_size)
 
-					local_path = fread(f2, path_length)
+					# decrypt remaining blocks
+					bufferSize = path_length + digest_length
+					if bufferSize % AES.block_size != 0:
+						bufferSize = bufferSize + (AES.block_size - bufferSize % AES.block_size)
+					fwrite(f2, cipher.decrypt(fread(f, bufferSize)))
+
+					# read remaining private header
+					f2.seek(12)
+					local_path = fread(f2, min(path_length, 1024 * 1024))
 					if len(local_path) != path_length:
 						print(' WARNING (invalid data #2): %s' % backup['path'])
 						continue
-					digest = fread(f2, digest_length)
+					digest = fread(f2, min(digest_length, 1024 * 1024))
 					if len(digest) != digest_length:
 						print(' WARNING (invalid data #3): %s' % backup['path'])
 						continue
-					tar_offset = f2.tell()
-					if f2.seek(tar_length, os.SEEK_CUR) != tar_offset + tar_length:
-						print(' WARNING (invalid data #4): %s' % backup['path'])
-						continue
 
-					# check digest
-					# if sha256_file(f2, tar_offset, tar_length) != digest:
-					# 	print(' FAILED (invalid digest): %s' % backup['path'])
-					# 	continue
+					# register path if exist
 					local_path = str(local_path, 'utf-8')
-
 					_path = os.path.realpath(local_path)
 					if len(_path) > 0 and os.path.isdir(_path):
 						if not _path in paths:
