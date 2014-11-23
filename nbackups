@@ -309,7 +309,6 @@ def backup(args):
 					f.seek(0)
 					with io.open('%s/%s_%s.bak' % (target, path_id, ts.strftime('%Y%m%d%H%M%S')), 'wb') as f2:
 						# init cipher
-						iv = random.read(AES.block_size)
 						cipher = AES.new(key(), AES.MODE_CBC, iv)
 
 						# write public header
