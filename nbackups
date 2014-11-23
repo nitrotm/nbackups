@@ -294,9 +294,8 @@ def backup(args):
 			f.seek(0)
 			fwrite(f, struct.pack('III', len(path_raw), len(digest), data_end - data_offset) + path_raw + digest)
 
-			# compute unique iv and init cipher
+			# compute unique iv
 			iv = random.read(AES.block_size)
-			cipher = AES.new(key(), AES.MODE_CBC, iv)
 
 			# encrypt data to output
 			for target in targets:
@@ -309,6 +308,10 @@ def backup(args):
 				if args.force or target in changed:
 					f.seek(0)
 					with io.open('%s/%s_%s.bak' % (target, path_id, ts.strftime('%Y%m%d%H%M%S')), 'wb') as f2:
+						# init cipher
+						iv = random.read(AES.block_size)
+						cipher = AES.new(key(), AES.MODE_CBC, iv)
+
 						# write public header
 						fwrite(f2, struct.pack('III', salt_size, pbkdf2_iterations, key_size) + salt() + iv)
 
@@ -396,15 +399,15 @@ def restore(args):
 				f2.seek(0)
 				(path_length, digest_length, tar_length) = struct.unpack('III', fread(f2, 3*4));
 				if f2.tell() != 3 * 4:
-					print('  FAILED (invalid data)')
+					print('  FAILED (invalid header)')
 					continue
 				local_path = fread(f2, min(path_length, 1024 * 1024))
 				if len(local_path) != path_length:
-					print('  FAILED (invalid data)')
+					print('  FAILED (invalid path)')
 					continue
 				digest = fread(f2, min(digest_length, 1024 * 1024))
 				if len(digest) != digest_length:
-					print('  FAILED (invalid data)')
+					print('  FAILED (invalid digest)')
 					continue
 				tar_offset = f2.tell()
 				if f2.seek(tar_length, os.SEEK_CUR) != tar_offset + tar_length:
@@ -413,7 +416,7 @@ def restore(args):
 
 				# check path and digest
 				if sha256_file(f2, tar_offset, tar_length) != digest:
-					print('  FAILED (invalid digest)')
+					print('  FAILED (invalid digest value)')
 					continue
 				local_path = str(local_path, 'utf-8')
 				if path != local_path:
@@ -472,7 +475,7 @@ def verify(args):
 					f2.seek(0)
 					(path_length, digest_length, tar_length) = struct.unpack('III', fread(f2, 3*4));
 					if f2.tell() != 3 * 4:
-						print('  FAILED (invalid data): %s' % tstext)
+						print('  FAILED (invalid header): %s' % tstext)
 						if args.clean:
 							f.close()
 							os.unlink(backup['path'])
@@ -480,7 +483,7 @@ def verify(args):
 						continue
 					local_path = fread(f2, min(path_length, 1024 * 1024))
 					if len(local_path) != path_length:
-						print('  FAILED (invalid data): %s' % tstext)
+						print('  FAILED (invalid path): %s' % tstext)
 						if args.clean:
 							f.close()
 							os.unlink(backup['path'])
@@ -488,7 +491,7 @@ def verify(args):
 						continue
 					digest = fread(f2, min(digest_length, 1024 * 1024))
 					if len(digest) != digest_length:
-						print('  FAILED (invalid data): %s' % tstext)
+						print('  FAILED (invalid digest): %s' % tstext)
 						if args.clean:
 							f.close()
 							os.unlink(backup['path'])
@@ -505,7 +508,7 @@ def verify(args):
 
 					# check path and digest
 					if sha256_file(f2, tar_offset, tar_length) != digest:
-						print('  FAILED (invalid digest): %s' % tstext)
+						print('  FAILED (invalid digest value): %s' % tstext)
 						if args.clean:
 							f.close()
 							os.unlink(backup['path'])
@@ -664,7 +667,7 @@ def discover(args):
 					f2.seek(0)
 					(path_length, digest_length, tar_length) = struct.unpack('III', fread(f2, 3*4));
 					if f2.tell() != 3 * 4:
-						print(' WARNING (invalid data #1): %s' % backup['path'])
+						print(' WARNING (invalid header): %s' % backup['path'])
 						continue
 					f2.seek(AES.block_size)
 
@@ -678,11 +681,11 @@ def discover(args):
 					f2.seek(12)
 					local_path = fread(f2, min(path_length, 1024 * 1024))
 					if len(local_path) != path_length:
-						print(' WARNING (invalid data #2): %s' % backup['path'])
+						print(' WARNING (invalid path): %s' % backup['path'])
 						continue
 					digest = fread(f2, min(digest_length, 1024 * 1024))
 					if len(digest) != digest_length:
-						print(' WARNING (invalid data #3): %s' % backup['path'])
+						print(' WARNING (invalid digest): %s' % backup['path'])
 						continue
 
 					# register path if exist
