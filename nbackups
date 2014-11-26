@@ -327,7 +327,7 @@ def backup(args):
 					print('  UP-TO-DATE: %s' % backups[0]['time'].astimezone().strftime('%Y-%m-%d %H:%M:%S'))
 
 				# remove obsolete backups
-				if max_backups and len(backups) > max_backups:
+				if max_backups and len(backups) >= max_backups:
 					for backup in backups[max_backups:]:
 						os.unlink(backup['path'])
 						print('  CLEANED: %s' % backup['time'].astimezone().strftime('%Y-%m-%d %H:%M:%S'))
