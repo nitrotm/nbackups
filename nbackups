@@ -635,6 +635,8 @@ def add(args):
 			if backups == 0:
 				print('')
 				class BackupArgs(object):
+					clean = False
+					force = False
 					path = _path
 				backup(BackupArgs())
 
